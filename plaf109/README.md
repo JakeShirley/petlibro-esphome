@@ -30,11 +30,11 @@ Note that screenshot uses mocked data (this feeder doesn't seem to get that cold
     - rotates plate
   - logs if pet arrived or not
   - closes door, if not already closed
-- daily feeding schedule, stored on-device
+- feeding schedule, stored on-device (see [Feeding Schedules](#feeding-schedules))
   - feeds front plate, then rotates AFTER meal
   - uses same flow as manual feed, no special handling
   - warns when a meal is missed (plate is not rotated in this case)
-    - warning survives reboots, is cleared at midnight or by a successful manual feed
+    - warning survives reboots, is cleared at the start of the next schedule cycle (midnight for daily schedules) or by a successful manual feed
 - open/close lid
   - will only close when pet is not present
   - using encoder to ensure lid opens/closes fully
@@ -60,6 +60,21 @@ Note that screenshot uses mocked data (this feeder doesn't seem to get that cold
   - not confident this is accurate, may need more calibration
   - uses factory formula
 
+### Feeding Schedules
+
+The `Feeding Schedule` switch turns scheduled meals on or off, and `Schedule Mode` picks how the three meals (one per plate section) repeat:
+
+- **Daily**: `Meal One`, `Meal Two`, and `Meal Three` are served every day at their set times. The meal dates are ignored.
+- **Multi-Day**: like the stock app's "Automatically Repeat Schedule", each meal is also given a date (`Meal One Date`, etc.). The cycle runs from the earliest meal date through the latest one, then repeats the next day. For example, Meal One and Two on 10/10 at 08:00 and 18:00 and Meal Three on 10/11 at 12:00 makes a 2-day cycle: two meals on 10/10, one on 10/11, two again on 10/12, and so on.
+  - days without a meal inside the cycle are skipped, so 10/10, 10/10, and 10/12 makes a 3-day cycle with a rest day in the middle
+  - meals dated in the future do not feed until that date
+  - when a cycle ends, the meal dates move forward to the current cycle, so they always show the dates of the current or upcoming meals
+  - unset meal dates default to today, which behaves the same as a daily schedule
+
+`Next Meal` shows when the next scheduled meal will be served in either mode, and is empty while the schedule is off. It's a quick way to check a multi-day plan, since a mistyped date shows up as an unexpectedly distant next meal.
+
+Meals are served from the front section in the order they come up, not by meal number, so just refill the plate at the end of each cycle. The stock app's "Reposition This Schedule" step isn't needed.
+
 ### To-Do
 
 - use of motor current to detect stall
@@ -67,7 +82,6 @@ Note that screenshot uses mocked data (this feeder doesn't seem to get that cold
 - scheduled meals will not trigger if set in close proximity (under 10-15m apart), maybe queue?
 - better calibration of temp sensor, if possible
 - bring some features to other devices
-- support for feeding schedules for multiple days
 
 ## Disassembly
 
