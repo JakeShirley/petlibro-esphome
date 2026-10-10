@@ -141,19 +141,32 @@ globals:
     type: uint32_t
     restore_value: yes
     initial_value: '0'
+  - id: meals_due_today  # bitmask of meals (bit 0 = meal one) the schedule serves today
+    type: uint8_t
+    restore_value: no
+    initial_value: '0'
+  - id: schedule_cycle_starts_today
+    type: bool
+    restore_value: no
+    initial_value: 'true'
 
 time:
   - platform: sntp
     id: sntp_time
+    on_time_sync:
+      - script.execute: refresh_schedule
     on_time:
       - seconds: 0
         minutes: 0
         hours: 0
         then:
+          - script.execute: refresh_schedule
           - lambda: |-
               id(visit_count) = 0;
               id(total_visit_seconds) = 0;
-              id(missed_meal_warning) = false;
+              if (id(schedule_cycle_starts_today)) {
+                id(missed_meal_warning) = false;  // plate is refilled between cycles
+              }
               id(last_visit_duration).publish_state(0);
           - component.update: pet_visit_count
           - component.update: pet_total_time
@@ -374,6 +387,112 @@ script:
                   - lambda: id(missed_meal_warning) = true;
                   - *apply-status-led
       - *close-lid
+  - id: scheduled_meal
+    parameters:
+      meal: int  # 0 = meal one
+    then:
+      - script.execute: refresh_schedule
+      - if:
+          condition:
+            switch.is_on: feeding_schedule_enabled
+          then:
+            - if:
+                condition:
+                  lambda: return id(meals_due_today) & (1 << meal);
+                then:
+                  - script.execute:
+                      id: feed_script
+                      manual: false
+                else:
+                  - logger.log:
+                      format: "meal %d is not scheduled today"
+                      args: ['meal + 1']
+                      tag: feeding
+  # A schedule cycle runs from the earliest meal date through the latest, then repeats the next day,
+  # so meals that share a date repeat daily. Works out which meals are due today, moves the dates
+  # forward once a cycle is over, and publishes the next meal. Meal numbers never affect the order.
+  - id: refresh_schedule
+    then:
+      - lambda: |-
+          datetime::TimeEntity *const times[] = {id(meal_one), id(meal_two), id(meal_three)};
+          datetime::DateEntity *const dates[] = {id(meal_one_date), id(meal_two_date), id(meal_three_date)};
+          // calendar dates are compared as whole days since the epoch
+          auto to_day = [](uint16_t year, uint8_t month, uint8_t day) -> int32_t {
+            ESPTime t{};
+            t.year = year;
+            t.month = month;
+            t.day_of_month = day;
+            t.recalc_timestamp_utc(false);
+            return t.timestamp / 86400;
+          };
+          auto from_day = [](int32_t day) { return ESPTime::from_epoch_utc((time_t) day * 86400); };
+
+          const ESPTime now = id(sntp_time).now();
+          if (!now.is_valid()) {
+            return;
+          }
+          const int32_t today = to_day(now.year, now.month, now.day_of_month);
+
+          int32_t meal_day[3];
+          int32_t first = INT32_MAX;
+          int32_t last = INT32_MIN;
+          for (size_t i = 0; i < 3; i++) {
+            if (!dates[i]->has_state()) {  // e.g. after upgrading, today keeps the schedule daily
+              dates[i]->make_call().set_date(now.year, now.month, now.day_of_month).perform();
+            }
+            meal_day[i] = to_day(dates[i]->year, dates[i]->month, dates[i]->day);
+            first = std::min(first, meal_day[i]);
+            last = std::max(last, meal_day[i]);
+          }
+          const int32_t period = last - first + 1;
+
+          // once the last meal's day is over, move every date forward by whole cycles to the current one
+          if (today > last) {
+            const int32_t shift = (today - first) / period * period;
+            for (size_t i = 0; i < 3; i++) {
+              meal_day[i] += shift;
+              const ESPTime date = from_day(meal_day[i]);
+              dates[i]->make_call().set_date(date.year, date.month, date.day_of_month).perform();
+            }
+            first += shift;
+          }
+          id(schedule_cycle_starts_today) = today <= first;
+
+          const int32_t now_s = now.hour * 3600 + now.minute * 60 + now.second;
+          uint8_t due = 0;
+          int32_t next_day = INT32_MAX;
+          int32_t next_s = 0;
+          for (size_t i = 0; i < 3; i++) {
+            if (!times[i]->has_state()) {
+              continue;
+            }
+            const int32_t meal_s = times[i]->hour * 3600 + times[i]->minute * 60 + times[i]->second;
+            int32_t day = meal_day[i];
+            if (day == today) {
+              due |= 1 << i;
+            }
+            if (day < today || (day == today && meal_s <= now_s)) {
+              day += period;  // already served this cycle
+            }
+            if (day < next_day || (day == next_day && meal_s < next_s)) {
+              next_day = day;
+              next_s = meal_s;
+            }
+          }
+          id(meals_due_today) = due;
+
+          std::string next;  // empty clears the sensor
+          if (id(feeding_schedule_enabled).state && next_day != INT32_MAX) {
+            ESPTime at = from_day(next_day);
+            at.hour = next_s / 3600;
+            at.minute = next_s / 60 % 60;
+            at.second = next_s % 60;
+            at.recalc_timestamp_local();
+            next = ESPTime::from_epoch_utc(at.timestamp).strftime("%Y-%m-%dT%H:%M:%SZ");
+          }
+          if (!id(next_meal).has_state() || id(next_meal).state != next) {
+            id(next_meal).publish_state(next);
+          }
 
 number:
   - platform: template
@@ -562,6 +681,14 @@ switch:
       sorting_group_id: feed
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+    on_state:
+      - &refresh-schedule
+        if:
+          condition:  # skip changes made by the schedule refresh itself
+            not:
+              script.is_running: refresh_schedule
+          then:
+            - script.execute: refresh_schedule
   - platform: template
     name: "Status LED"
     id: status_led
@@ -876,6 +1003,14 @@ text_sensor:
       }
       return ESPTime::from_epoch_utc(id(last_visit_epoch)).strftime("%Y-%m-%dT%H:%M:%SZ");
   - platform: template
+    name: "Next Meal"
+    id: next_meal  # published by refresh_schedule, empty while the schedule is off
+    icon: "mdi:calendar-arrow-right"
+    device_class: timestamp
+    web_server:
+      sorting_group_id: feed
+    update_interval: never
+  - platform: template
     id: hardware_version
     name: "Hardware Version"
     icon: "mdi:tag-outline"
@@ -957,14 +1092,12 @@ datetime:
     restore_value: true
     web_server:
       sorting_group_id: feed
-    on_time: &feed
-      - if:
-          condition:
-            switch.is_on: feeding_schedule_enabled
-          then:
-            - script.execute:
-                id: feed_script
-                manual: false
+    on_time:
+      - script.execute:
+          id: scheduled_meal
+          meal: 0
+    on_value:
+      - *refresh-schedule
 
   - platform: template
     name: "Meal Two"
@@ -975,7 +1108,12 @@ datetime:
     restore_value: true
     web_server:
       sorting_group_id: feed
-    on_time: *feed
+    on_time:
+      - script.execute:
+          id: scheduled_meal
+          meal: 1
+    on_value:
+      - *refresh-schedule
 
   - platform: template
     name: "Meal Three"
@@ -986,4 +1124,46 @@ datetime:
     restore_value: true
     web_server:
       sorting_group_id: feed
-    on_time: *feed
+    on_time:
+      - script.execute:
+          id: scheduled_meal
+          meal: 2
+    on_value:
+      - *refresh-schedule
+
+  # meals on different dates make a multi-day schedule, see refresh_schedule
+  - platform: template
+    name: "Meal One Date"
+    id: meal_one_date
+    type: DATE
+    icon: "mdi:calendar"
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: feed
+    on_value:
+      - *refresh-schedule
+
+  - platform: template
+    name: "Meal Two Date"
+    id: meal_two_date
+    type: DATE
+    icon: "mdi:calendar"
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: feed
+    on_value:
+      - *refresh-schedule
+
+  - platform: template
+    name: "Meal Three Date"
+    id: meal_three_date
+    type: DATE
+    icon: "mdi:calendar"
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: feed
+    on_value:
+      - *refresh-schedule
