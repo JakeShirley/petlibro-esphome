@@ -141,7 +141,7 @@ globals:
     type: uint32_t
     restore_value: yes
     initial_value: '0'
-  - id: meals_due_today  # bitmask of meals (bit 0 = meal one) the schedule feeds today
+  - id: meals_due_today  # bitmask of meals (bit 0 = meal one) the schedule serves today
     type: uint8_t
     restore_value: no
     initial_value: '0'
@@ -154,16 +154,13 @@ time:
   - platform: sntp
     id: sntp_time
     on_time_sync:
-      - &rollover-schedule
-        script.execute:
-          id: refresh_schedule
-          rollover: true
+      - script.execute: refresh_schedule
     on_time:
       - seconds: 0
         minutes: 0
         hours: 0
         then:
-          - *rollover-schedule
+          - script.execute: refresh_schedule
           - lambda: |-
               id(visit_count) = 0;
               id(total_visit_seconds) = 0;
@@ -378,9 +375,7 @@ script:
     parameters:
       meal: int  # 0 = meal one
     then:
-      - script.execute:
-          id: refresh_schedule
-          rollover: false
+      - script.execute: refresh_schedule
       - if:
           condition:
             switch.is_on: feeding_schedule_enabled
@@ -397,11 +392,10 @@ script:
                       format: "meal %d is not scheduled today"
                       args: ['meal + 1']
                       tag: feeding
-  # works out which meals are due today and the next meal time, for both schedule modes
-  # multi-day: each meal repeats every (last meal date - first meal date + 1) days, starting on its date
+  # A schedule cycle runs from the earliest meal date through the latest, then repeats the next day,
+  # so meals that share a date repeat daily. Works out which meals are due today, moves the dates
+  # forward once a cycle is over, and publishes the next meal. Meal numbers never affect the order.
   - id: refresh_schedule
-    parameters:
-      rollover: bool  # also fill in unset meal dates and move finished cycles forward
     then:
       - lambda: |-
           datetime::TimeEntity *const times[] = {id(meal_one), id(meal_two), id(meal_three)};
@@ -422,57 +416,47 @@ script:
             return;
           }
           const int32_t today = to_day(now.year, now.month, now.day_of_month);
-          const bool multi_day = id(schedule_mode).active_index().value_or(0) == 1;
 
           int32_t meal_day[3];
           int32_t first = INT32_MAX;
           int32_t last = INT32_MIN;
           for (size_t i = 0; i < 3; i++) {
-            if (rollover && !dates[i]->has_state()) {
+            if (!dates[i]->has_state()) {  // e.g. after upgrading, today keeps the schedule daily
               dates[i]->make_call().set_date(now.year, now.month, now.day_of_month).perform();
             }
-            meal_day[i] = dates[i]->has_state() ? to_day(dates[i]->year, dates[i]->month, dates[i]->day) : -1;
-            if (meal_day[i] >= 0) {
-              first = std::min(first, meal_day[i]);
-              last = std::max(last, meal_day[i]);
-            }
+            meal_day[i] = to_day(dates[i]->year, dates[i]->month, dates[i]->day);
+            first = std::min(first, meal_day[i]);
+            last = std::max(last, meal_day[i]);
           }
-          const bool has_dates = first <= last;
-          const int32_t period = has_dates ? last - first + 1 : 1;
+          const int32_t period = last - first + 1;
 
-          // once a cycle is over, shift every date by whole cycles so they show the current one
-          if (rollover && multi_day && has_dates && today > last) {
+          // once the last meal's day is over, move every date forward by whole cycles to the current one
+          if (today > last) {
             const int32_t shift = (today - first) / period * period;
             for (size_t i = 0; i < 3; i++) {
-              if (meal_day[i] < 0) {
-                continue;
-              }
               meal_day[i] += shift;
               const ESPTime date = from_day(meal_day[i]);
               dates[i]->make_call().set_date(date.year, date.month, date.day_of_month).perform();
             }
             first += shift;
           }
+          id(schedule_cycle_starts_today) = today <= first;
 
           const int32_t now_s = now.hour * 3600 + now.minute * 60 + now.second;
           uint8_t due = 0;
           int32_t next_day = INT32_MAX;
           int32_t next_s = 0;
           for (size_t i = 0; i < 3; i++) {
-            int32_t day = multi_day ? meal_day[i] : today;
-            const int32_t every = multi_day ? period : 1;
-            if (!times[i]->has_state() || day < 0) {
+            if (!times[i]->has_state()) {
               continue;
             }
-            if (day < today) {
-              day += (today - day + every - 1) / every * every;  // first repeat on or after today
-            }
             const int32_t meal_s = times[i]->hour * 3600 + times[i]->minute * 60 + times[i]->second;
+            int32_t day = meal_day[i];
             if (day == today) {
               due |= 1 << i;
-              if (meal_s <= now_s) {
-                day += every;
-              }
+            }
+            if (day < today || (day == today && meal_s <= now_s)) {
+              day += period;  // already served this cycle
             }
             if (day < next_day || (day == next_day && meal_s < next_s)) {
               next_day = day;
@@ -480,9 +464,8 @@ script:
             }
           }
           id(meals_due_today) = due;
-          id(schedule_cycle_starts_today) = !multi_day || !has_dates || today <= first || (today - first) % period == 0;
 
-          std::string next;
+          std::string next;  // empty clears the sensor
           if (id(feeding_schedule_enabled).state && next_day != INT32_MAX) {
             ESPTime at = from_day(next_day);
             at.hour = next_s / 3600;
@@ -689,9 +672,7 @@ switch:
             not:
               script.is_running: refresh_schedule
           then:
-            - script.execute:
-                id: refresh_schedule
-                rollover: false
+            - script.execute: refresh_schedule
   - platform: template
     name: "Status LED"
     id: status_led
@@ -1007,7 +988,7 @@ text_sensor:
       return ESPTime::from_epoch_utc(id(last_visit_epoch)).strftime("%Y-%m-%dT%H:%M:%SZ");
   - platform: template
     name: "Next Meal"
-    id: next_meal  # published by the refresh_schedule script, empty when nothing is scheduled
+    id: next_meal  # published by refresh_schedule, empty while the schedule is off
     icon: "mdi:calendar-arrow-right"
     device_class: timestamp
     web_server:
@@ -1134,12 +1115,12 @@ datetime:
     on_value:
       - *refresh-schedule
 
-  # only used by the multi-day schedule, unset dates default to today
+  # meals on different dates make a multi-day schedule, see refresh_schedule
   - platform: template
     name: "Meal One Date"
     id: meal_one_date
     type: DATE
-    icon: "mdi:calendar-today"
+    icon: "mdi:calendar"
     optimistic: true
     restore_value: true
     web_server:
@@ -1151,7 +1132,7 @@ datetime:
     name: "Meal Two Date"
     id: meal_two_date
     type: DATE
-    icon: "mdi:calendar-today"
+    icon: "mdi:calendar"
     optimistic: true
     restore_value: true
     web_server:
@@ -1163,31 +1144,10 @@ datetime:
     name: "Meal Three Date"
     id: meal_three_date
     type: DATE
-    icon: "mdi:calendar-today"
+    icon: "mdi:calendar"
     optimistic: true
     restore_value: true
     web_server:
       sorting_group_id: feed
     on_value:
-      - *refresh-schedule
-
-select:
-  - platform: template
-    name: "Schedule Mode"
-    id: schedule_mode
-    icon: "mdi:calendar-sync"
-    web_server:
-      sorting_group_id: feed
-    options:  # refresh_schedule relies on this order
-      - Daily
-      - Multi-Day
-    initial_option: Daily
-    optimistic: true
-    restore_value: true
-    on_value:
-      - *rollover-schedule
-
-interval:
-  - interval: 1min  # keeps next meal current if the clock jumps past a meal
-    then:
       - *refresh-schedule
