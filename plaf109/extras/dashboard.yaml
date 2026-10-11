@@ -4,8 +4,8 @@ external_components:
 
 custom_web_server:
   - path: ${path}
-    js_url: https://github.com/sylphrena0/petlibro-esphome-plaf109-ui/releases/download/${version}/app.js
-    css_url: https://github.com/sylphrena0/petlibro-esphome-plaf109-ui/releases/download/${version}/style.css
+    js_url: https://github.com/JakeShirley/petlibro-esphome-plaf109-ui/releases/download/${version}/app.js
+    css_url: https://github.com/JakeShirley/petlibro-esphome-plaf109-ui/releases/download/${version}/style.css
     body: <esp-app></esp-app>
     title: ${title}
     local: true  # cannot load dynamically due to CORS
