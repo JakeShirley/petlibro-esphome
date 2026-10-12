@@ -137,6 +137,10 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: chime_start_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   - id: last_visit_epoch
     type: uint32_t
     restore_value: yes
@@ -299,12 +303,26 @@ script:
   - id: chime_repeat
     mode: restart
     then:
+      - lambda: id(chime_start_time) = millis();
       - while:
           condition:
-            lambda: return id(chime_interval).state > 0;
+            lambda: |-
+              const float interval = id(chime_interval).state;
+              const float timeout = id(chime_timeout).state;
+              if (interval <= 0) return false;
+              // only chime if the next chime falls within the timeout, 0 chimes until the pet arrives
+              return timeout <= 0 || millis() - id(chime_start_time) + interval * 1000 <= timeout * 60000;
           then:
             - delay: !lambda return id(chime_interval).state * 1000;
             - button.press: chime
+      - if:  # feed_script stops this script once it stops waiting for the pet, so reaching here means the timeout expired
+          condition:
+            lambda: return id(chime_interval).state > 0 && id(chime_timeout).state > 0;
+          then:
+            - logger.log:
+                format: "chime stopped after %.0f minute timeout, lid remains open"
+                args: ['id(chime_timeout).state']
+                tag: feeding
   - id: feed_script
     mode: single
     parameters:
@@ -545,6 +563,19 @@ number:
     min_value: 0
     max_value: 600
     step: 5
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+  - platform: template
+    name: "Chime Timeout"
+    id: chime_timeout
+    icon: "mdi:bell-off-outline"
+    web_server:
+      sorting_group_id: feed
+    unit_of_measurement: min
+    min_value: 0  # 0 chimes until the pet arrives
+    max_value: 60  # matches arrival timeout
+    step: 1
     optimistic: true
     restore_value: true
     initial_value: 0
