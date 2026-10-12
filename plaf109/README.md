@@ -24,6 +24,7 @@ Note that screenshot uses mocked data (this feeder doesn't seem to get that cold
   - waits for pet to arrive, up to a configurable timeout
     - a timeout of 0 waits until the pet arrives
     - optionally repeats chime at a configurable interval
+      - optionally stops repeating after a configurable timeout, keeping the lid open (0 chimes until the pet arrives)
     - closing the lid cancels the meal
   - if pet arrived
     - keeps door open for a configurable minimum feeding time after arrival
