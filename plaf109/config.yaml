@@ -88,7 +88,7 @@ packages:
     vars:
       title: ${friendly_name}
       path: ${dashboard_path}
-      version: multi-day-schedule-82e9b41
+      version: multi-day-schedule-bec9886
 
 
 debug:
